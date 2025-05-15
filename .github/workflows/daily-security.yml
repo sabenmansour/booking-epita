@@ -2,88 +2,45 @@ name: Daily Security Pipeline
 
 on:
   schedule:
-    - cron: '0 2 * * *'
-  workflow_dispatch:
-
-permissions:
-  contents: read
-  security-events: write
+    - cron: '0 0 * * *'  # Daily at midnight
+  push:
+    branches: [main]
 
 jobs:
-  dependencies-analysis:
+  DependenciesAnalysis:
     runs-on: ubuntu-latest
-    name: Dependencies Analysis (OSV Scanner)
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        
-      - name: Download OSV Scanner
-        run: |
-          curl -L -o osv-scanner https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_linux_amd64
-          chmod +x osv-scanner
-        
-      - name: Run OSV Scanner
-        run: |
-          echo "Scanning with OSV Scanner..."
-          ./osv-scanner --format=sarif --output=dependencies.sarif . || true
-          
-          # Créer un fichier SARIF vide si aucune vulnérabilité n'est trouvée
-          if [ ! -f "dependencies.sarif" ]; then
-            echo "No vulnerabilities found, creating empty SARIF file"
-            cat > dependencies.sarif << 'EOF'
-{
-  "version": "2.1.0",
-  "runs": [
-    {
-      "tool": {
-        "driver": {
-          "name": "OSV Scanner",
-          "version": "1.0.0"
-        }
-      },
-      "results": []
-    }
-  ]
-}
-EOF
-          fi
-          
-          # Afficher le contenu pour debug
-          echo "Contents of dependencies.sarif:"
-          cat dependencies.sarif || echo "File not readable"
-        continue-on-error: true
-            
-      - name: Upload Dependencies SARIF
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: dependencies.sarif
-          category: dependencies
-        if: always()
 
-  source-code-analysis:
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Install OSV Scanner v2.0.2
+      run: |
+        curl -L -o osv-scanner https://github.com/google/osv-scanner/releases/download/v2.0.2/osv-scanner_linux_amd64
+        chmod +x osv-scanner
+        sudo mv osv-scanner /usr/local/bin/osv-scanner
+
+    - name: Run OSV Scanner
+      run: osv-scanner --format sarif --output osv-scan-results.sarif app/
+      continue-on-error: true
+    - name: Upload OSV SARIF report to Security Dashboard
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ./osv-scan-results.sarif
+
+  SemgrepAnalysis:
     runs-on: ubuntu-latest
     container:
       image: returntocorp/semgrep
-    name: Source Code Analysis
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        
-      - name: Run Semgrep
-        run: |
-          echo "Running Semgrep analysis..."
-          semgrep --config=p/java --sarif --output=semgrep.sarif .
-          
-          # Afficher le nombre de vulnérabilités trouvées
-          if [ -f "semgrep.sarif" ]; then
-            ISSUES=$(cat semgrep.sarif | jq '.runs[0].results | length' 2>/dev/null || echo 0)
-            echo "Semgrep found $ISSUES security issues"
-          fi
-        continue-on-error: true
-          
-      - name: Upload Source Code SARIF
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: semgrep.sarif
-          category: source-code
-        if: always()
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Run Semgrep with Java ruleset
+      run: semgrep --config p/java --sarif --output semgrep-results.sarif
+
+    - name: Upload Semgrep SARIF to Security Dashboard
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: semgrep-results.sarif
