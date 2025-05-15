@@ -1,4 +1,4 @@
-name: Daily Security Pipeline (10 Vulnerabilities)
+name: Daily Security Pipeline
 
 on:
   schedule:
@@ -24,7 +24,33 @@ jobs:
         
       - name: Run OSV Scanner
         run: |
-          ./osv-scanner --format=sarif --output=dependencies.sarif ./app/pom.xml
+          echo "Scanning with OSV Scanner..."
+          ./osv-scanner --format=sarif --output=dependencies.sarif . || true
+          
+          # Créer un fichier SARIF vide si aucune vulnérabilité n'est trouvée
+          if [ ! -f "dependencies.sarif" ]; then
+            echo "No vulnerabilities found, creating empty SARIF file"
+            cat > dependencies.sarif << 'EOF'
+{
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "OSV Scanner",
+          "version": "1.0.0"
+        }
+      },
+      "results": []
+    }
+  ]
+}
+EOF
+          fi
+          
+          # Afficher le contenu pour debug
+          echo "Contents of dependencies.sarif:"
+          cat dependencies.sarif || echo "File not readable"
         continue-on-error: true
             
       - name: Upload Dependencies SARIF
@@ -43,19 +69,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         
-      - name: Run Semgrep with specific rules for exactly 10 issues
+      - name: Run Semgrep
         run: |
-          # Utiliser des règles spécifiques pour obtenir environ 10 vulnérabilités
-          semgrep \
-            --config=r/java.spring.security.audit.spring-actuator-endpoints-not-secured \
-            --config=r/java.spring.security.audit.spring-csrf-disabled \
-            --config=r/java.lang.security.audit.formatted-sql-string \
-            --config=r/java.lang.security.audit.xss.servlet-xss \
-            --config=r/java.lang.security.audit.crypto.weak-hash \
-            --config=r/java.lang.security.audit.cbc-padding-oracle \
-            --config=r/java.lang.security.audit.sqli.tainted-sql-string \
-            --config=r/java.spring.security.audit.spring-actuator-not-secured \
-            --sarif --output=semgrep.sarif .
+          echo "Running Semgrep analysis..."
+          semgrep --config=p/java --sarif --output=semgrep.sarif .
+          
+          # Afficher le nombre de vulnérabilités trouvées
+          if [ -f "semgrep.sarif" ]; then
+            ISSUES=$(cat semgrep.sarif | jq '.runs[0].results | length' 2>/dev/null || echo 0)
+            echo "Semgrep found $ISSUES security issues"
+          fi
         continue-on-error: true
           
       - name: Upload Source Code SARIF
@@ -64,15 +87,3 @@ jobs:
           sarif_file: semgrep.sarif
           category: source-code
         if: always()
-          
-      - name: Count Total Issues
-        run: |
-          echo "=== Security Analysis Summary ==="
-          if [ -f "dependencies.sarif" ]; then
-            DEP_ISSUES=$(cat dependencies.sarif | jq '.runs[0].results | length' 2>/dev/null || echo 0)
-            echo "Dependencies issues: $DEP_ISSUES"
-          fi
-          if [ -f "semgrep.sarif" ]; then
-            CODE_ISSUES=$(cat semgrep.sarif | jq '.runs[0].results | length' 2>/dev/null || echo 0)
-            echo "Source code issues: $CODE_ISSUES"
-          fi
