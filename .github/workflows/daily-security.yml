@@ -1,114 +1,86 @@
-name: Pull Request Security Checks
+name: Daily Security Pipeline
 
 on:
-  pull_request:
-    branches: [ main ]
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
   security-events: write
-  pull-requests: write
 
 jobs:
-  dependencies-analysis:
+  source-code-analysis:
     runs-on: ubuntu-latest
-    name: Dependencies Analysis (Differential)
+    container:
+      image: returntocorp/semgrep
+    name: Source Code Analysis
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
         
-      # Utiliser GitHub Dependency Review pour les PR
-      - name: Dependency Review
-        uses: actions/dependency-review-action@v4
-        with:
-          fail-on-severity: medium
-          allow-licenses: MIT, Apache-2.0, BSD-3-Clause
-          comment-summary-in-pr: always
+      - name: Run Semgrep with comprehensive ruleset
+        run: |
+          echo "=== Running Semgrep with multiple rulesets ==="
+          
+          semgrep --config=p/java \
+                  --config=p/security-audit \
+                  --config=p/owasp-top-ten \
+                  --config=p/secrets \
+                  --config=r/java.spring.security \
+                  --config=r/java.lang.security \
+                  --sarif --output=semgrep-comprehensive.sarif .
+          
+          echo "=== Semgrep Results Summary ==="
+          if [ -f "semgrep-comprehensive.sarif" ]; then
+            ISSUE_COUNT=$(cat semgrep-comprehensive.sarif | jq '.runs[0].results | length' 2>/dev/null || echo 0)
+            echo "Total issues found: $ISSUE_COUNT"
+            
+            echo "=== Vulnerability types found ==="
+            cat semgrep-comprehensive.sarif | jq -r '.runs[0].results[].ruleId' 2>/dev/null | sort | uniq -c
+          fi
         continue-on-error: true
+          
+      - name: Upload SARIF file
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep-comprehensive.sarif
+          category: source-code
+        if: always()
+
+  dependencies-analysis:
+    runs-on: ubuntu-latest
+    name: Dependencies Analysis
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
         
-      # Analyse différentielle avec OWASP Dependency Check
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
           
-      - name: Run Dependency Check (Current)
+      - name: Run OWASP Dependency Check
         run: |
+          echo "=== Running OWASP Dependency Check ==="
           wget -O dependency-check.zip "https://github.com/jeremylong/DependencyCheck/releases/download/v8.4.3/dependency-check-8.4.3-release.zip"
           unzip dependency-check.zip
+          
           ./dependency-check/bin/dependency-check.sh \
-            --project "booking-epita-pr" \
+            --project "booking-epita" \
             --scan . \
             --format "JSON" \
+            --format "SARIF" \
             --out . \
-            --enableExperimental
-          mv dependency-check-report.json current-dependencies.json
+            --enableExperimental \
+            --enableRetired \
+            --failOnCVSS 0
         continue-on-error: true
         
-      - name: Checkout Base branch
-        uses: actions/checkout@v4
+      - name: Upload Dependency Check Results
+        uses: github/codeql-action/upload-sarif@v3
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          
-      - name: Run Dependency Check (Base)
-        run: |
-          ./dependency-check/bin/dependency-check.sh \
-            --project "booking-epita-base" \
-            --scan . \
-            --format "JSON" \
-            --out . \
-            --enableExperimental
-          mv dependency-check-report.json base-dependencies.json
-        continue-on-error: true
-        
-      - name: Upload Dependency Analysis Results
-        uses: actions/upload-artifact@v4
-        with:
-          name: dependency-analysis-results
-          path: |
-            current-dependencies.json
-            base-dependencies.json
-
-  source-code-analysis:
-    runs-on: ubuntu-latest
-    container:
-      image: returntocorp/semgrep
-    name: Source Code Analysis (Differential)
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          
-      - name: Run Semgrep (Differential)
-        run: |
-          echo "Running Semgrep differential analysis..."
-          semgrep --config=p/java \
-                  --baseline-commit=${{ github.event.pull_request.base.sha }} \
-                  --json --output=semgrep-diff.json . || true
-                  
-          if [ -f "semgrep-diff.json" ]; then
-            echo "=== Semgrep Results ==="
-            cat semgrep-diff.json | jq '.' || echo "No valid JSON output"
-            NEW_ISSUES=$(cat semgrep-diff.json | jq '.results | length' 2>/dev/null || echo 0)
-            echo "Found $NEW_ISSUES new security issues in this PR"
-            
-            # Si des vulnérabilités sont trouvées, créer un résumé
-            if [ "$NEW_ISSUES" -gt 0 ]; then
-              echo "🚨 SECURITY ALERT: $NEW_ISSUES new vulnerabilities detected!"
-              cat semgrep-diff.json | jq -r '.results[] | "- " + .check_id + " in " + .path' || true
-            else
-              echo "✅ No new security vulnerabilities detected"
-            fi
-          fi
-        continue-on-error: true
-                  
-      - name: Upload Security Results
-        uses: actions/upload-artifact@v4
-        with:
-          name: source-code-scan-results
-          path: semgrep-diff.json
+          sarif_file: dependency-check-report.sarif
+          category: dependencies
         if: always()
